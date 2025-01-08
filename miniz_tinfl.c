@@ -183,6 +183,40 @@ static void tinfl_clear_tree(tinfl_decompressor *r)
         MZ_CLEAR_ARR(r->m_tree_2);
 }
 
+/* Caution: This might not correctly handle degenerate tables with only
+ * 0 or 1 codes (possible with offsets codes).
+ * I think it is impossible for the "code length codes" table to have fewer
+ * than 2 nonzero entries, in a valid file. */
+static int tinfl_validate_code_size_table(const mz_uint8 *tbl, mz_uint32 tbl_len)
+{
+    mz_uint8 i;
+    mz_uint8 max_cs = 0;
+    mz_uint32 t_cur = 0;
+    mz_uint32 t_expected;
+    for (i = 0; i < tbl_len; i++)
+    {
+        if (tbl[i] > max_cs)
+        {
+            max_cs = tbl[i];
+        }
+    }
+    if (max_cs < 1 || max_cs > 29)
+        return 0;
+    t_expected = 1U << max_cs;
+    for (i = 0; i < tbl_len; i++)
+    {
+        if (tbl[i])
+        {
+            t_cur += 1U << (max_cs - (mz_uint32)tbl[i]);
+        }
+        if (t_cur > t_expected)
+            return 0;
+    }
+    if (t_cur != t_expected)
+        return 0;
+    return 1;
+}
+
 tinfl_status tinfl_decompress(tinfl_decompressor *r, const mz_uint8 *pIn_buf_next, size_t *pIn_buf_size, mz_uint8 *pOut_buf_start, mz_uint8 *pOut_buf_next, size_t *pOut_buf_size, const mz_uint32 decomp_flags)
 {
     static const mz_uint16 s_length_base[31] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258, 0, 0 };
@@ -322,6 +356,11 @@ tinfl_status tinfl_decompress(tinfl_decompressor *r, const mz_uint8 *pIn_buf_nex
                     r->m_code_size_2[s_length_dezigzag[counter]] = (mz_uint8)s;
                 }
                 r->m_table_sizes[2] = 19;
+
+                if (!tinfl_validate_code_size_table(r->m_code_size_2, r->m_table_sizes[2]))
+                {
+                    TINFL_CR_RETURN_FOREVER(200, TINFL_STATUS_FAILED);
+                }
             }
             for (; (int)r->m_type >= 0; r->m_type--)
             {
@@ -436,6 +475,7 @@ tinfl_status tinfl_decompress(tinfl_decompressor *r, const mz_uint8 *pIn_buf_nex
                     }
                     else
                     {
+                        int guard_counter = 0;
                         int sym2;
                         mz_uint code_len;
 #if TINFL_USE_64BIT_BITBUF
@@ -489,6 +529,21 @@ tinfl_status tinfl_decompress(tinfl_decompressor *r, const mz_uint8 *pIn_buf_nex
                         }
                         bit_buf >>= code_len;
                         num_bits -= code_len;
+
+                        /* assert(sym2 != 0 && counter != 0); */
+                        if (sym2 == 0 && counter == 0)
+                        {
+                            if (guard_counter > 100)
+                            {
+                                TINFL_CR_RETURN_FOREVER(40, TINFL_STATUS_FAILED);
+                            }
+
+                            guard_counter++;
+                        }
+                        else
+                        {
+                            guard_counter = 0;
+                        }
 
                         pOut_buf_cur[0] = (mz_uint8)counter;
                         if (sym2 & 256)
